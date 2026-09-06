@@ -145,7 +145,7 @@ def random_languages():
     chosen = random.sample(language_pool, k=lang_count)
     if "EN" not in chosen and np.random.rand() < 0.9:
         chosen[0] = "EN"
-    if "FR" not in chosen and np.random.rand() < 0.5:
+    if "ES" not in chosen and np.random.rand() < 0.5:
         chosen[1] = "ES"
     return sorted(set(chosen))
 
@@ -197,7 +197,7 @@ def random_shift_periods(base_date):
         base_date.replace(hour=end_hour, minute=0, second=0, microsecond=0)
     )]
 
-def generate_random_agents(base_date, min_agents=0, max_agents=100):
+def generate_random_agents(base_date, min_agents=20, max_agents=50):
     agent_total = random.randint(min_agents, max_agents)
     return [
         Agent(agent_id + 1, random_languages(), random_shift_periods(base_date))
@@ -279,152 +279,382 @@ def run_once(agents):
 
     return answer_rate, answer_rate_lang, hourly, agent_occ, system_hourly_occ, global_occ
 
+class GeneticAlgorithm:
 
+    def __init__(
+        self,
+        population_size=50,
+        generations=24,
+        mutation_rate=0.25,
+        crossover_rate=0.85,
+        elite=5
+    ):
+        self.pareto_history = []
+        self.history_occ = []
+        self.history_ar = []
+        self.population_size = population_size
+        self.generations = generations
+        self.mutation_rate = mutation_rate
+        self.crossover_rate = crossover_rate
+        self.elite = elite
 
-import matplotlib.pyplot as plt
-from matplotlib.colors import LinearSegmentedColormap
+        self.base = datetime(2026,4,3)
 
-def pareto_front(points):
+        self.population = [
+            generate_random_agents(self.base)
+            for _ in range(population_size)
+        ]
 
-    front = []
+        self.best_workforce = None
+        self.best_score = -float("inf")
+        self.best_answer_rate = 0
+        self.best_occupancy = 0
 
-    for i,p in enumerate(points):
-
-        dominated = False
-
-        for j,q in enumerate(points):
-
-            if i == j:
-                continue
-
-            if (
-                q[0] >= p[0] and
-                q[1] >= p[1] and
-                (q[0] > p[0] or q[1] > p[1])
-            ):
-                dominated = True
-                break
-
-        if not dominated:
-            front.append(i)
-
-    return front
-
-
-def montecarlo(n=50, repeticiones=1):
-
-    base = datetime(2026,4,3)
-
-    occ_history = []
-    ar_history = []
-    agents_history = []
-
-    for i in range(n):
-
-        # Generar UN solo workforce
-        workforce = generate_random_agents(
-            base,
-            min_agents=20,
-            max_agents=40
-        )
-
-        occs = []
+    
+    def fitness(self, workforce):
+        scores = []
         ars = []
+        occs = []
 
-        # Evaluarlo 20 veces
-        for _ in range(repeticiones):
+        np_state = np.random.get_state()
+        py_state = random.getstate()
 
-            ar, _, _, _, _, occ = run_once(deepcopy(workforce))
+        for _ in range(20):      # 10 simulaciones Monte Carlo
+            
+            agents = deepcopy(workforce)
 
+        
+
+            ar, _, _, _, _, occ = run_once(agents)
+
+            scores.append(ar*60 + occ*40)
             ars.append(ar)
             occs.append(occ)
 
-        # Guardar el promedio del workforce
-        occ_history.append(np.mean(occs))
-        ar_history.append(np.mean(ars))
-        agents_history.append(len(workforce))
+        np.random.set_state(np_state)
+        random.setstate(py_state)
+        return np.mean(scores), np.mean(ars), np.mean(occs)
 
-        if (i + 1) % 100 == 0:
-            print(f"Workforces evaluated: {i+1}/{n}")
+    def evaluate(self):
 
-    return occ_history, ar_history, agents_history
+        scores = []
+        ars = []
+        occs = []
 
+        for workforce in self.population:
 
-def plot_pareto(occ,ar):
+            score, ar, occ = self.fitness(workforce)
 
+            scores.append(score)
+            ars.append(ar)
+            occs.append(occ)
 
-    fig,ax = plt.subplots(figsize=(11,8))
+        return scores, ars, occs
+    def tournament(self,scores):
 
-    ax.scatter(
-        occ,
-        ar,
-        color="blue",
-        alpha=0.25,
-        s=25
-    )
+        i,j=random.sample(range(len(scores)),2)
 
-    pts = list(zip(occ,ar))
+        if scores[i]>scores[j]:
+            return deepcopy(self.population[i])
 
-    front = pareto_front(pts)
+        return deepcopy(self.population[j])
 
-    ax.scatter(
-        np.array(occ)[front],
-        np.array(ar)[front],
-        edgecolors="black",
-        linewidth=1,
-        s=90
-    )
+    def crossover(self,p1,p2):
 
-    sm = plt.cm.ScalarMappable(
-        
-        norm=plt.Normalize(
-            0,
-            len(occ)-1
+        if random.random()>self.crossover_rate:
+
+            return deepcopy(p1)
+
+        cut=random.randint(
+            1,
+            min(len(p1),len(p2))-1
         )
-    )
 
-    sm.set_array([])
+        child=deepcopy(p1[:cut])+deepcopy(p2[cut:])
+
+        return child
+
+    def mutate(self,child):
+
+        for agent in child:
+            if random.random()<self.mutation_rate:
+                agent.languages=random_languages()
+            if random.random()<self.mutation_rate:
+                agent.active_periods=random_shift_periods(self.base)
+
+        for _ in range(random.randint(1,4)):
+            r=random.random()
+            if r<0.35 and len(child)<40:
+                child.append(Agent(len(child)+1,random_languages(),random_shift_periods(self.base)))
+            elif r<0.70 and len(child)>15:
+                child.pop(random.randrange(len(child)))
 
 
-    ax.set_xlabel("Occupancy")
+    def evolve(self):
 
-    ax.set_ylabel("Answer Rate")
+        history = []
 
-    ax.set_title(
-        "Monte Carlo Pareto Front"
-    )
+    # Evaluar población inicial
+        scores, ars, occs = self.evaluate()
+        
+        front = self.pareto_front(ars, occs)
+        self.pareto_history.append(front)
+    
+        order = np.argsort(scores)[::-1]
+        best_idx = order[0]
 
-    ax.grid(True)
+        self.best_score = scores[best_idx]
+        self.best_workforce = deepcopy(self.population[best_idx])
+        self.best_answer_rate = ars[best_idx]
+        self.best_occupancy = occs[best_idx]
 
-    plt.show()
+        print(
+            f"Generation   0 | "
+            f"Fitness={scores[best_idx]:7.3f} | "
+            f"Answer Rate={ars[best_idx]:.2%} | "
+            f"Occupancy={occs[best_idx]:.2%} | "
+            f"Agents={len(self.population[best_idx])}"
+        )
 
+        history.append(scores[best_idx])
 
-occ, ar, nagents = montecarlo(
-    n=50,
-    repeticiones=1
+    # Evolución
+        for g in range(1, self.generations + 1):
+
+            order = np.argsort(scores)[::-1]
+
+        # Crear nueva población
+            new_population = []
+
+        # Elitismo
+            for i in range(self.elite):
+                new_population.append(
+                    deepcopy(self.population[order[i]])
+            )
+
+        # Hijos
+            while len(new_population) < self.population_size:
+
+                p1 = self.tournament(scores)
+                p2 = self.tournament(scores)
+
+                child = self.crossover(p1, p2)
+
+                self.mutate(child)
+
+                new_population.append(child)
+
+        # Sustituir población
+            self.population = new_population
+
+        # Evaluar nueva generación
+            scores, ars, occs = self.evaluate()
+            self.history_occ.append(occs.copy())
+            self.history_ar.append(ars.copy())
+            front = self.pareto_front(ars, occs)
+            self.pareto_history.append(front)
+            order = np.argsort(scores)[::-1]
+            best_idx = order[0]
+
+        # Guardar mejor global
+            if scores[best_idx] > self.best_score:
+                self.best_score = scores[best_idx]
+                self.best_workforce = deepcopy(self.population[best_idx])
+                self.best_answer_rate = ars[best_idx]
+                self.best_occupancy = occs[best_idx]
+
+            history.append(scores[best_idx])
+
+            print(
+                f"Generation {g:3d} | "
+                f"Fitness={scores[best_idx]:7.3f} | "
+                f"Answer Rate={ars[best_idx]:.2%} | "
+                f"Occupancy={occs[best_idx]:.2%} | "
+                f"Agents={len(self.population[best_idx])}"
+            )
+
+        return history
+
+    def best_solution(self):
+
+        if self.best_workforce is None:
+            raise RuntimeError("No valid solution found.")
+
+        return (
+            deepcopy(self.best_workforce),
+            self.best_score,
+            self.best_answer_rate,
+            self.best_occupancy
+        )
+    def pareto_front(self, ars, occs):
+
+        points = list(zip(occs, ars))
+
+        front = []
+
+        for i, p in enumerate(points):
+
+            dominated = False
+
+            for j, q in enumerate(points):
+
+                if i == j:
+                    continue
+
+                if (
+                    q[0] >= p[0] and
+                    q[1] >= p[1] and
+                    (q[0] > p[0] or q[1] > p[1])
+                ):
+                    dominated = True
+                    break
+
+            if not dominated:
+                front.append(p)
+
+        return front
+    
+    def plot_pareto(self):
+
+        import matplotlib.pyplot as plt
+        import numpy as np
+        from matplotlib.colors import LinearSegmentedColormap
+
+        cmap = LinearSegmentedColormap.from_list(
+            "pareto",
+            [
+                "red",
+                "orange",
+                "yellow",
+                "green",
+                "blue",
+                "violet"
+            ]
+        )
+
+        colors = cmap(np.linspace(0, 1, len(self.history_occ)))
+
+        fig, ax = plt.subplots(figsize=(11,8))
+
+        for g in range(len(self.history_occ)):
+
+            occ = self.history_occ[g]
+            ar = self.history_ar[g]
+
+            color = colors[g]
+
+        # Todos los individuos de la generación
+            ax.scatter(
+                occ,
+                ar,
+                color=color,
+                s=25,
+                alpha=0.25
+            )
+
+        # Calcular frente de Pareto
+            front = []
+
+            for i in range(len(occ)):
+
+                dominated = False
+
+                for j in range(len(occ)):
+
+                    if i == j:
+                        continue
+
+                    if (
+                        occ[j] >= occ[i]
+                        and ar[j] >= ar[i]
+                        and (
+                            occ[j] > occ[i]
+                            or ar[j] > ar[i]
+                        )
+                    ):
+                        dominated = True
+                        break
+
+                if not dominated:
+                    front.append(i)
+
+        # Dibujar únicamente el frente
+            ax.scatter(
+                np.array(occ)[front],
+                np.array(ar)[front],
+                color=color,
+                edgecolors="black",
+                linewidths=0.7,
+                s=80
+            )
+
+        sm = plt.cm.ScalarMappable(
+            cmap=cmap,
+            norm=plt.Normalize(
+                0,
+                len(self.history_occ)-1
+            )
+        )
+
+        sm.set_array([])
+
+        fig.colorbar(
+            sm,
+            ax=ax,
+            label="Generation"
+        )
+
+        ax.set_xlabel("Occupancy")
+        ax.set_ylabel("Answer Rate")
+        ax.set_title("Evolution of the Pareto Front")
+        ax.grid(True)
+
+        plt.show()
+
+ga=GeneticAlgorithm(
+
+    population_size=10,
+
+    generations=24,
+
+    mutation_rate=0.25,
+
+    crossover_rate=0.85,
+
+    elite=3
+
 )
 
-print("\n==================== MONTE CARLO RESULTS ====================\n")
+ga.evolve()
 
-print(f"Simulations: {len(occ)}")
+best,score,best_ar,best_occ=ga.best_solution()
+ga.plot_pareto()
 
-print("\nANSWER RATE")
-print(f"   Min : {min(ar):.2%}")
-print(f"   Max : {max(ar):.2%}")
-print(f"   Mean: {np.mean(ar):.2%}")
+print("\nBEST FITNESS:",score)
+print("BEST ANSWER RATE:", f"{best_ar:.2%}")
+print("BEST OCCUPANCY:", f"{best_occ:.2%}")
 
-print("\nOCCUPANCY")
-print(f"   Min : {min(occ):.2%}")
-print(f"   Max : {max(occ):.2%}")
-print(f"   Mean: {np.mean(occ):.2%}")
+print("\nNUMBER OF AGENTS:",len(best))
 
-print("\nNUMBER OF AGENTS")
-print(f"   Min : {min(nagents)}")
-print(f"   Max : {max(nagents)}")
-print(f"   Mean: {np.mean(nagents):.2f}")
+for a in best:
 
-print("\n=============================================================\n")
-plot_pareto(
-    occ,
-    ar
-)
+    print()
+
+    print("Agent",a.agent_id)
+
+    print("Languages:",a.languages)
+
+    print("Working periods:")
+
+    for s,e in a.active_periods:
+
+        print(
+
+            s.strftime("%H:%M"),
+
+            "-",
+
+            e.strftime("%H:%M")
+
+        )
+
